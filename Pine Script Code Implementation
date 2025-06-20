@@ -1,0 +1,95 @@
+//Pine Script code with further optimisations like trailing stoploss and adaptive slippage
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cmmandave
+//@version=6
+strategy("NIFTY Golden Cross Adaptive Slippage & Trailing Stop", 
+     overlay=true, 
+     initial_capital=250000000, 
+     default_qty_type=strategy.cash, 
+     default_qty_value=250000000, 
+     commission_type=strategy.commission.cash_per_order,  
+     commission_value=0)
+
+// ======== CORE STRATEGY PARAMETERS ========
+fastLength    = input(21, "Fast MA Period")
+slowLength    = input(22, "Slow MA Period")
+takeProfitPct = input(6.0, "Take Profit %") / 100
+lotSize       = input(75, "Base Lot Size")
+
+// ======== VOLATILITY SLIPPAGE SYSTEM ========
+var int slippageTicks = na
+var float slippageAmount = na
+
+vix = request.security("INDIAVIX", timeframe.period, close)
+timeInPreMarket = not na(time(timeframe.period, "0900-0915"))
+timeInPostMarket = not na(time(timeframe.period, "1515-1530"))
+isThursday = dayofweek == dayofweek.thursday
+nextWeekMonth = month(time + 7 * 86400000)  // Add 7 days (in ms)
+isMonthlyExpiry = isThursday and (nextWeekMonth != month)
+isExpiryDay = isMonthlyExpiry
+
+var float vixOver25Pct = 0.0
+var int vixOver25Count = 0
+if vix > 25
+    vixOver25Count += 1
+vixOver25Pct := 100 * vixOver25Count / bar_index
+
+vixScore = vix >= 30 ? 3 : vix >= 25 ? 2 : vix >= 20 ? 1 : 0
+timeScore = (timeInPreMarket ? 1 : 0) + (timeInPostMarket ? 1 : 0) + (hour >= 22 ? 1 : 0)
+eventScore = isExpiryDay ? 2 : 0
+totalScore = math.min(vixScore + timeScore + eventScore, 6)
+
+slippageTicks := totalScore == 0 ? 1 : totalScore <= 2 ? 3 : totalScore <= 4 ? 6 : 10
+slippageAmount := slippageTicks * syminfo.mintick
+
+var int prePostCount = 0
+if (timeInPreMarket or timeInPostMarket)
+    prePostCount += 1
+
+// ======== TRADING LOGIC ========
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+goldenCross = ta.crossover(fastMA, slowMA)
+deathCross = ta.crossunder(fastMA, slowMA)
+
+adjustedLotSize = vix >= 25 ? 0 : vix >= 20 ? int(lotSize) : (lotSize)
+
+// ======== TRAILING STOP-LOSS LOGIC ========
+trailOffset = close * 0.01 * (vix / 20)  // 1% of close, scaled by volatility
+
+if (goldenCross and adjustedLotSize > 0)
+    strategy.entry("Long", strategy.long, qty=adjustedLotSize)
+    strategy.exit("XL", "Long", trail_price=close, trail_offset=trailOffset, limit=close * (1 + takeProfitPct) - slippageAmount)
+
+if (deathCross and adjustedLotSize > 0)
+    strategy.entry("Short", strategy.short, qty=adjustedLotSize)
+    strategy.exit("XS", "Short", trail_price=close, trail_offset=trailOffset, limit=close * (1 - takeProfitPct) + slippageAmount)
+
+// ======== VISUALIZATION & REPORTING ========
+plot(slippageTicks, "Slippage Ticks", color=color.purple, linewidth=2)
+plot(fastMA, "Fast MA", color=color.blue)
+plot(slowMA, "Slow MA", color=color.red)
+
+// Summary Table
+var table summaryTable = table.new(position.bottom_right, 2, 8)
+if barstate.islast
+    table.cell(summaryTable, 0, 0, "Metric", bgcolor=color.gray)
+    table.cell(summaryTable, 1, 0, "Value", bgcolor=color.gray)
+
+    // Calculate win rate manually
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : na
+
+    table.cell(summaryTable, 0, 1, "Total Trades")
+    table.cell(summaryTable, 1, 1, str.tostring(strategy.closedtrades))
+    table.cell(summaryTable, 0, 2, "Win Rate")
+    table.cell(summaryTable, 1, 2, str.tostring(math.round(winRate, 1)) + "%")
+    table.cell(summaryTable, 0, 3, "Avg Slippage %")
+    table.cell(summaryTable, 1, 3, str.tostring(math.round(slippageAmount / close[1] * 100, 2)) + "%")
+    table.cell(summaryTable, 0, 4, "Max Drawdown")
+    table.cell(summaryTable, 1, 4, str.tostring(math.round(strategy.max_drawdown, 1)) + "%")
+    table.cell(summaryTable, 0, 5, "Net Profit")
+    table.cell(summaryTable, 1, 5, str.tostring(math.round(strategy.netprofit)))
+    table.cell(summaryTable, 0, 6, "VIX >25% Time")
+    table.cell(summaryTable, 1, 6, str.tostring(math.round(vixOver25Pct, 1)) + "%")
+    table.cell(summaryTable, 0, 7, "Pre/Post Market Bars")
+    table.cell(summaryTable, 1, 7, str.tostring(prePostCount))
